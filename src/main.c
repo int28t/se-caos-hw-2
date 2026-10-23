@@ -3,16 +3,12 @@
 //==============================================================================
 #include "crossroad.h"
 
+#include <errno.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
-
-volatile sig_atomic_t stopSignal = 0;
-
-//------------------------------------------------------------------------------
-// Обработчик только запоминает сигнал; вывод и завершение выполняются в цикле.
-static void SignalHandler(int number) { stopSignal = number; }
 
 //------------------------------------------------------------------------------
 // Подготовка, моделирование и закрытие журнала.
@@ -23,8 +19,7 @@ int main(int argc, char **argv) {
                            "завершает модель с итогом.\n");
     return argc == 2 && !strcmp(argv[1], "--help") ? 0 : 2;
   }
-  struct sigaction action = {0};
-  action.sa_handler = SignalHandler;
+  struct sigaction action = {.sa_handler = SIG_DFL};
   sigemptyset(&action.sa_mask);
   if (sigaction(SIGINT, &action, NULL) < 0 ||
       sigaction(SIGTERM, &action, NULL) < 0) {
@@ -38,7 +33,7 @@ int main(int argc, char **argv) {
   }
   Config cfg;
   if (!ConfigLoad(&cfg, argv[1]) || !ConfigValidate(&cfg))
-    return stopSignal ? 128 + (int)stopSignal : 2;
+    return 2;
   const char *logPath = argc == 3 ? argv[2] : "crossroad.log";
   struct stat input, log;
   if (stat(argv[1], &input) == 0 && stat(logPath, &log) == 0 &&
@@ -50,6 +45,17 @@ int main(int argc, char **argv) {
   Output out;
   if (!OutputOpen(&out, logPath))
     return 1;
+  sigset_t signals;
+  sigemptyset(&signals);
+  sigaddset(&signals, SIGINT);
+  sigaddset(&signals, SIGTERM);
+  int error = pthread_sigmask(SIG_BLOCK, &signals, NULL);
+  if (error) {
+    errno = error;
+    perror("pthread_sigmask");
+    OutputClose(&out);
+    return 1;
+  }
   int status = SimulationRun(&cfg, &out);
   OutputClose(&out);
   if (out.failed) {

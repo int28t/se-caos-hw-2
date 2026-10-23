@@ -28,8 +28,10 @@ if(BUILD_TESTING)
     add_executable(state_test
         tests/test_state.c
         src/simulation_state.c
+        src/simulation_time.c
     )
     target_include_directories(state_test PRIVATE src)
+    target_compile_definitions(state_test PRIVATE clock_gettime=TestClockGettime)
     list(APPEND CROSSROAD_TARGETS state_test)
     add_test(NAME state COMMAND state_test)
     set_tests_properties(state PROPERTIES TIMEOUT 15)

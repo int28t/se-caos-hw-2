@@ -7,8 +7,6 @@
 #include <stdlib.h>
 #include <time.h>
 
-volatile sig_atomic_t stopSignal = 0;
-
 #define CHECK(condition)                                                       \
   do {                                                                         \
     if (!(condition)) {                                                        \

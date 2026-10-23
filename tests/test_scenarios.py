@@ -154,6 +154,7 @@ def verify(events):
             assert abs(float(data["среднее"]) - mean) <= 0.00501
             assert data["прибыло"] == data["прошло"] + data["отказов"] + data["ожидают"] + data["в_зоне"]
             assert data["потоков"] == data["прибыло"] - data["отказов"]
+        assert not run["цель"] or len(completed) + len(active) <= run["цель"]
     assert not permits and events[-1][1] == "ИТОГО"
     return events[-1][2]
 
@@ -231,6 +232,25 @@ class Scenarios(unittest.TestCase):
         self.assertEqual(self.run_model(text=empty)[0]["прибыло"], 0)
         self.run_model(text=empty, extra="ticks 0\ntarget 1", expected=3)
 
+    def test_target_reserves_parallel_crossings(self):
+        text = ("ticks 0\ntick_ms 5\npriority 0\nmin_green 1\nmax_green 4\n"
+                "stream N car north straight 2 2 1000\n"
+                "stream S car south straight 2 2 1000\n"
+                "conflict N S 0\nphase both N S\n")
+        for target in (1, 2, 5):
+            summary, _, _ = self.run_model(text=text, extra=f"target {target}")
+            self.assertEqual(summary["прошло"], target)
+            self.assertEqual(summary["в_зоне"], 0)
+
+    def test_period_freezes_unfinished_crossings(self):
+        text = ("ticks 10\ntick_ms 20\nmax_green 1000\n"
+                "stream A car north straight 2 1000 1000\nphase a A\n")
+        summary, events, _ = self.run_model(text=text)
+        self.assertEqual(summary["прошло"], 0)
+        self.assertEqual(summary["в_зоне"], 1)
+        self.assertGreater(summary["ожидают"], 0)
+        self.assertEqual(next(d["причина"] for _, e, d in events if e == "Завершение"), "период")
+
     def test_safe_priority_and_adaptive_response(self):
         extra = "tick_ms 10\nticks 50\nmax_green 6"
         _, priority, _ = self.run_model("emergency", extra=extra)
@@ -300,28 +320,45 @@ class Scenarios(unittest.TestCase):
         self.assertEqual(config.read_bytes(), original)
 
     def test_signal_completion(self):
-        self.run_model(extra="ticks 2")
+        cases = (
+            ("green", "max_green 1000\nstream A car north straight 2 1000 1000\nphase a A\n",
+             "Въезд:", 1),
+            ("drain", "min_green 2\nmax_green 10\nemergency_rate 1000\n"
+             "stream A car north straight 4 10 1000\n"
+             "stream B car east left 4 1 1000\nphase a A\nphase b B\n",
+             "Въезд закрыт: фаза=a пересекают=1", 1),
+            ("clearance", "min_green 1\nmax_green 2\nclearance 20\n"
+             "stream A car north straight 2 1 1000\nphase a A\n",
+             "Интервал:", 0),
+        )
         for sig in (signal.SIGINT, signal.SIGTERM):
-            config, journal = self.directory / "input.conf", self.directory / "signal.log"
-            journal.unlink(missing_ok=True)
-            config.write_text("ticks 0\ntick_ms 20\nmax_green 100\n"
-                              "stream A car north straight 2 100 1000\nphase a A\n")
-            with subprocess.Popen([str(BINARY), str(config), str(journal)], stdout=subprocess.DEVNULL,
-                                  stderr=subprocess.PIPE, text=True) as process:
-                deadline = time.monotonic() + 5
-                while time.monotonic() < deadline:
-                    if journal.exists() and "Въезд:".encode() in journal.read_bytes() and journal.read_bytes().count("Очередь:".encode()) >= 2:
-                        break
-                    time.sleep(0.01)
-                else:
-                    process.kill()
-                    self.fail("Модель не начала выполнение")
-                process.send_signal(sig)
-                _, stderr = process.communicate(timeout=3)
-                self.assertEqual(process.returncode, 128 + sig, stderr)
-                events = read_events(journal.read_text())
-                verify(events)
-                self.assertEqual(next(d["причина"] for _, e, d in events if e == "Завершение"), "прерывание")
+            for state, contents, marker, active in cases:
+                with self.subTest(signal=sig, state=state):
+                    config, journal = self.directory / "input.conf", self.directory / "signal.log"
+                    journal.unlink(missing_ok=True)
+                    config.write_text("ticks 0\ntick_ms 20\n" + contents)
+                    with subprocess.Popen([str(BINARY), str(config), str(journal)], stdout=subprocess.DEVNULL,
+                                          stderr=subprocess.PIPE, text=True) as process:
+                        deadline = time.monotonic() + 5
+                        while time.monotonic() < deadline:
+                            text = journal.read_bytes() if journal.exists() else b""
+                            if marker.encode() in text and text.count("Очередь:".encode()) >= 2:
+                                break
+                            if process.poll() is not None:
+                                _, stderr = process.communicate()
+                                self.fail(stderr)
+                            time.sleep(0.001)
+                        else:
+                            process.kill()
+                            self.fail(f"Модель не достигла {state}")
+                        for _ in range(5):
+                            process.send_signal(sig)
+                        _, stderr = process.communicate(timeout=3)
+                        self.assertEqual(process.returncode, 128 + sig, stderr)
+                        events = read_events(journal.read_text())
+                        summary = verify(events)
+                        self.assertEqual(summary["в_зоне"], active)
+                        self.assertEqual(next(d["причина"] for _, e, d in events if e == "Завершение"), "прерывание")
 
     def test_closed_stdout_preserves_log(self):
         journal = self.directory / "closed.log"

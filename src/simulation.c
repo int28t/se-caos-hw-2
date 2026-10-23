@@ -113,6 +113,18 @@ static void JoinWorker(Simulation *s, Worker *worker) {
 }
 
 //------------------------------------------------------------------------------
+// Заблокированный сигнал остаётся ожидающим до sigwait в главном потоке.
+static int ReceiveSignal(const sigset_t *signals, int *number) {
+  sigset_t pending;
+  *number = 0;
+  if (sigpending(&pending) < 0)
+    return errno;
+  if (!sigismember(&pending, SIGINT) && !sigismember(&pending, SIGTERM))
+    return 0;
+  return sigwait(signals, number);
+}
+
+//------------------------------------------------------------------------------
 int SimulationRun(const Config *cfg, Output *out) {
   Simulation s;
   if (!SimulationInit(&s, cfg, out)) {
@@ -125,12 +137,17 @@ int SimulationRun(const Config *cfg, Output *out) {
   sigaddset(&signals, SIGTERM);
   int error = pthread_sigmask(SIG_BLOCK, &signals, &previousMask);
   bool maskSaved = !error;
+  int signalNumber = 0;
+  if (!error)
+    error = ReceiveSignal(&signals, &signalNumber);
   SimulationLock(&s);
   ParametersOutLocked(&s);
   if (error)
     SimulationStopLocked(&s, STOP_RUNTIME_ERROR, 0);
   else if (out->failed)
     SimulationStopLocked(&s, STOP_OUTPUT_ERROR, 0);
+  else if (signalNumber)
+    SimulationStopLocked(&s, STOP_SIGNAL, signalNumber);
   for (unsigned i = 0; i < cfg->streamCount && s.stopReason == STOP_NONE; ++i) {
     DirectionWorker *direction = &s.directionThreads[i];
     error = pthread_create(&direction->worker.thread, NULL, DirectionRun,
@@ -154,22 +171,19 @@ int SimulationRun(const Config *cfg, Output *out) {
   if (s.stopReason == STOP_NONE && SimulationStartTimeLocked(&s))
     SimulationNotifyLocked(&s, &s.controllerThread);
   SimulationUnlock(&s);
-  if (maskSaved) {
-    error = pthread_sigmask(SIG_SETMASK, &previousMask, NULL);
-    if (error) {
-      SimulationLock(&s);
-      SimulationStopLocked(&s, STOP_RUNTIME_ERROR, 0);
-      SimulationUnlock(&s);
-    }
-  }
   bool arrivals = false, snapshot = false;
   uint64_t snapshotNs = 0, snapshotTick = 0;
   for (unsigned i = 0; i < cfg->streamCount; ++i)
     arrivals |= cfg->streams[i].rate != 0;
   for (;;) {
+    error = maskSaved ? ReceiveSignal(&signals, &signalNumber) : 0;
     SimulationLock(&s);
-    if (SimulationUpdateLocked(&s) && stopSignal)
-      SimulationStopLocked(&s, STOP_SIGNAL, (int)stopSignal);
+    if (SimulationUpdateLocked(&s)) {
+      if (error)
+        SimulationStopLocked(&s, STOP_RUNTIME_ERROR, 0);
+      else if (signalNumber)
+        SimulationStopLocked(&s, STOP_SIGNAL, signalNumber);
+    }
     if (s.stopReason == STOP_NONE && !arrivals && !s.active &&
         !SimulationQueueCountLocked(&s))
       SimulationStopLocked(&s, cfg->target ? STOP_UNREACHABLE : STOP_EXHAUSTED,
@@ -206,7 +220,15 @@ int SimulationRun(const Config *cfg, Output *out) {
   SimulationUnlock(&s);
   if (!SimulationDestroy(&s)) {
     perror("Не удалось освободить состояние модели");
-    return 1;
+    status = 1;
+  }
+  if (maskSaved) {
+    error = pthread_sigmask(SIG_SETMASK, &previousMask, NULL);
+    if (error) {
+      errno = error;
+      perror("pthread_sigmask");
+      status = 1;
+    }
   }
   return status;
 }

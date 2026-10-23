@@ -1,11 +1,13 @@
 //==============================================================================
 // Проверка остановки ожидающих потоков и времени жизни общего состояния.
 //==============================================================================
+#undef clock_gettime
 #include "simulation.h"
 
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 
 #define CHECK(condition)                                                       \
   do {                                                                         \
@@ -21,6 +23,16 @@ typedef struct WaitContext {
   bool observedStop;
   int error;
 } WaitContext;
+
+static uint64_t clockNs;
+
+//------------------------------------------------------------------------------
+int TestClockGettime(clockid_t clock, struct timespec *now) {
+  CHECK(clock == CLOCK_MONOTONIC);
+  *now = (struct timespec){.tv_sec = (time_t)(clockNs / 1000000000),
+                           .tv_nsec = (long)(clockNs % 1000000000)};
+  return 0;
+}
 
 //------------------------------------------------------------------------------
 static void *WaitForStop(void *argument) {
@@ -171,9 +183,45 @@ static void TestIndependentRuns(void) {
 }
 
 //------------------------------------------------------------------------------
+static void TestPeriodBoundary(void) {
+  Config cfg = TestConfig();
+  Output out = {.logFd = -1};
+  Simulation s;
+  CHECK(SimulationInit(&s, &cfg, &out));
+  SimulationLock(&s);
+  clockNs = UINT64_C(1000000000);
+  CHECK(SimulationStartTimeLocked(&s));
+  uint64_t boundary = cfg.ticks * s.tickNs;
+  s.flows[0].arrived = s.flows[0].count = 1;
+  s.flows[0].items[0] = (Participant){.id = 1};
+  s.flows[1].arrived = 1;
+  s.flows[1].occupied = true;
+  s.flows[1].active = (Participant){.id = 2};
+  s.flows[1].leaveAtNs = s.tickNs;
+  s.active = 1;
+  s.controller.signals = 2;
+  clockNs = s.startNs + boundary - 1;
+  CHECK(SimulationUpdateLocked(&s) && s.tick == cfg.ticks - 1);
+  ++clockNs;
+  CHECK(SimulationUpdateLocked(&s) && s.nowNs == boundary);
+  ++clockNs;
+  CHECK(!SimulationUpdateLocked(&s) && s.stopReason == STOP_PERIOD);
+  CHECK(s.nowNs == boundary + 1);
+  clockNs += 100 * s.tickNs;
+  CHECK(!SimulationUpdateLocked(&s) && s.nowNs == boundary + 1);
+  CHECK(SimulationStopLocked(&s, STOP_SIGNAL, SIGINT));
+  CHECK(s.stopReason == STOP_PERIOD && !s.passed && s.active == 1);
+  CHECK(s.flows[0].count == 1 && s.flows[1].occupied);
+  CHECK(SimulationCheckLocked(&s));
+  SimulationUnlock(&s);
+  CHECK(SimulationDestroy(&s));
+}
+
+//------------------------------------------------------------------------------
 int main(void) {
   TestInvariants();
   TestIndependentRuns();
+  TestPeriodBoundary();
   for (unsigned i = 0; i < 20; ++i)
     TestStopAndJoin();
   return 0;

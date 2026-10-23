@@ -78,7 +78,6 @@ typedef struct Output {
   bool failed, consoleFailed, logFailed;
 } Output;
 
-extern volatile sig_atomic_t stopSignal;
 extern const char *kindNames[2];
 extern const char *directionNames[4];
 extern const char *maneuverNames[4];

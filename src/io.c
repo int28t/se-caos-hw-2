@@ -34,7 +34,7 @@ bool ReadText(int fd, char *buffer, size_t capacity) {
     bool full = used == capacity - 1;
     ssize_t n =
         read(fd, full ? &extra : buffer + used, full ? 1 : capacity - 1 - used);
-    if (n < 0 && errno == EINTR && !stopSignal)
+    if (n < 0 && errno == EINTR)
       continue;
     if (n < 0 || (full && n > 0))
       return false;

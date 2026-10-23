@@ -13,8 +13,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-volatile sig_atomic_t stopSignal = 0;
-
 #define CHECK(condition)                                                       \
   do {                                                                         \
     if (!(condition)) {                                                        \
@@ -46,6 +44,9 @@ static struct Resources {
 int TestThreadCreate(pthread_t *thread, const pthread_attr_t *attributes,
                      void *(*run)(void *), void *argument) {
   CHECK(pthread_mutex_lock(&resourceMutex) == 0);
+  sigset_t mask;
+  CHECK(pthread_sigmask(SIG_SETMASK, NULL, &mask) == 0);
+  CHECK(sigismember(&mask, SIGINT) && sigismember(&mask, SIGTERM));
   Simulation *s;
   ParticipantWorker *p = NULL;
   if (run == ParticipantRun) {
@@ -205,6 +206,25 @@ static void Run(unsigned failCreate, unsigned failOpen) {
 }
 
 //------------------------------------------------------------------------------
+static void TestPendingSignal(int number) {
+  resources = (struct Resources){0};
+  sigset_t signals, previousMask, pending;
+  sigemptyset(&signals);
+  sigaddset(&signals, SIGINT);
+  sigaddset(&signals, SIGTERM);
+  CHECK(pthread_sigmask(SIG_BLOCK, &signals, &previousMask) == 0);
+  CHECK(raise(number) == 0);
+  Config cfg = TestConfig();
+  Output out;
+  CHECK(OutputOpen(&out, "/dev/null"));
+  CHECK(SimulationRun(&cfg, &out) == 128 + number);
+  CHECK(!resources.createCalls && resources.openCalls == resources.closeCalls);
+  CHECK(sigpending(&pending) == 0 && !sigismember(&pending, number));
+  OutputClose(&out);
+  CHECK(pthread_sigmask(SIG_SETMASK, &previousMask, NULL) == 0);
+}
+
+//------------------------------------------------------------------------------
 int main(void) {
   CHECK(freopen("/dev/null", "w", stdout));
   Run(0, 0);
@@ -213,5 +233,7 @@ int main(void) {
     Run(i, 0);
   for (unsigned i = 1; i <= 8; ++i)
     Run(0, i);
+  TestPendingSignal(SIGINT);
+  TestPendingSignal(SIGTERM);
   return 0;
 }
