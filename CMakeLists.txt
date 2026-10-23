@@ -54,22 +54,32 @@ if(BUILD_TESTING)
     add_test(NAME lifecycle COMMAND lifecycle_test)
     set_tests_properties(lifecycle PROPERTIES TIMEOUT 30)
 
-    find_package(Python3 COMPONENTS Interpreter)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
-    if(Python3_FOUND)
-        add_test(NAME scenarios
-            COMMAND ${Python3_EXECUTABLE}
-                ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_scenarios.py
-                $<TARGET_FILE:crossroad>
-        )
-        set_tests_properties(scenarios PROPERTIES TIMEOUT 60)
-    endif()
+    add_test(NAME scenarios
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_scenarios.py
+            $<TARGET_FILE:crossroad>
+    )
+    set_tests_properties(scenarios PROPERTIES TIMEOUT 60)
+
+    add_test(NAME stress
+        COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/stress.py
+            $<TARGET_FILE:crossroad>
+    )
+    set_tests_properties(stress PROPERTIES TIMEOUT 180 LABELS stress)
 endif()
 
 option(ENABLE_SANITIZERS
     "Enable AddressSanitizer and UndefinedBehaviorSanitizer"
     OFF
 )
+option(ENABLE_TSAN "Enable ThreadSanitizer" OFF)
+
+if(ENABLE_SANITIZERS AND ENABLE_TSAN)
+    message(FATAL_ERROR "Use separate builds for ASan/UBSan and TSan")
+endif()
 
 foreach(target IN LISTS CROSSROAD_TARGETS)
     target_link_libraries(${target} PRIVATE Threads::Threads)
@@ -87,8 +97,15 @@ foreach(target IN LISTS CROSSROAD_TARGETS)
     if(ENABLE_SANITIZERS AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_options(${target} PRIVATE
             -fsanitize=address,undefined
+            -fno-sanitize-recover=all
             -fno-omit-frame-pointer
         )
         target_link_options(${target} PRIVATE -fsanitize=address,undefined)
+    elseif(ENABLE_TSAN AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(${target} PRIVATE
+            -fsanitize=thread
+            -fno-omit-frame-pointer
+        )
+        target_link_options(${target} PRIVATE -fsanitize=thread)
     endif()
 endforeach()
