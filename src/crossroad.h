@@ -88,7 +88,7 @@ bool ReadText(int fd, char *buffer, size_t capacity);
 // Открытие и закрытие журнала.
 bool OutputOpen(Output *out, const char *path);
 void OutputClose(Output *out);
-// Одно сообщение одновременно для консоли и журнала.
+// Одно сообщение для консоли и журнала; во время работы модели под mutex.
 void OutputEvent(Output *out, uint64_t tick, const char *description);
 // Загрузка параметров и проверка совместимости фаз.
 bool ConfigLoad(Config *cfg, const char *path);

@@ -44,6 +44,7 @@ typedef struct DirectionWorker {
   Worker worker;
   Simulation *simulation;
   unsigned stream, firstParticipant, participantLimit;
+  uint64_t randomState, nextRandomTick;
 } DirectionWorker;
 
 struct Simulation {
@@ -90,8 +91,8 @@ void SimulationEventLocked(Simulation *s, const char *format, ...);
 void SimulationNotifyLocked(Simulation *s, Worker *worker);
 void SimulationWakeHeadsLocked(Simulation *s);
 
-unsigned ParticipantRandom(unsigned seed, unsigned stream, uint64_t tick,
-                           bool emergency);
+bool DirectionGenerateLocked(DirectionWorker *direction, uint64_t tick,
+                             bool *emergency);
 void *DirectionRun(void *argument);
 void *ParticipantRun(void *argument);
 void *ControllerRun(void *argument);

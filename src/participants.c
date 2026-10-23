@@ -9,15 +9,27 @@
 #include <stdlib.h>
 
 //------------------------------------------------------------------------------
-// Решение привязано к направлению и такту, а не к порядку исполнения потоков.
-unsigned ParticipantRandom(unsigned seed, unsigned stream, uint64_t tick,
-                           bool emergency) {
-  uint64_t value = seed ^ ((uint64_t)stream << 32) ^
-                   (tick * UINT64_C(0x9e3779b97f4a7c15)) ^
-                   (emergency ? UINT64_C(0xd1b54a32d192ed03) : 0);
+// SplitMix64; переполнение состояния является частью алгоритма.
+static unsigned RandomNext(uint64_t *state) {
+  uint64_t value = (*state += UINT64_C(0x9e3779b97f4a7c15));
   value = (value ^ (value >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
   value = (value ^ (value >> 27)) * UINT64_C(0x94d049bb133111eb);
   return (unsigned)((value ^ (value >> 31)) % 1000);
+}
+
+//------------------------------------------------------------------------------
+// Два числа на такт, включая пропущенные; tick >= nextRandomTick.
+bool DirectionGenerateLocked(DirectionWorker *direction, uint64_t tick,
+                             bool *emergency) {
+  const Config *cfg = direction->simulation->cfg;
+  const Stream *stream = &cfg->streams[direction->stream];
+  direction->randomState += (tick - direction->nextRandomTick) *
+                            (UINT64_C(2) * UINT64_C(0x9e3779b97f4a7c15));
+  unsigned arrival = RandomNext(&direction->randomState);
+  unsigned urgent = RandomNext(&direction->randomState);
+  direction->nextRandomTick = tick + 1;
+  *emergency = stream->kind == CAR && urgent < cfg->emergencyRate;
+  return arrival < stream->rate;
 }
 
 //------------------------------------------------------------------------------
@@ -195,16 +207,12 @@ FreeParticipantLocked(Simulation *s, const DirectionWorker *direction) {
 
 //------------------------------------------------------------------------------
 static void ArriveLocked(Simulation *s, DirectionWorker *direction,
-                         ParticipantWorker *worker) {
+                         ParticipantWorker *worker, bool emergency) {
   unsigned i = direction->stream;
   const Stream *stream = &s->cfg->streams[i];
   Flow *flow = &s->flows[i];
-  Participant p = {.id = ++s->nextId,
-                   .arrivedNs = s->nowNs,
-                   .emergency =
-                       stream->kind == CAR &&
-                       ParticipantRandom(s->cfg->seed, i, s->tick, true) <
-                           s->cfg->emergencyRate};
+  Participant p = {
+      .id = ++s->nextId, .arrivedNs = s->nowNs, .emergency = emergency};
   ++flow->arrived;
   SimulationEventLocked(s, "Прибытие: поток=%s id=%" PRIu64 " экстренный=%u",
                         stream->name, p.id, p.emergency);
@@ -252,7 +260,6 @@ void *DirectionRun(void *argument) {
   DirectionWorker *direction = argument;
   Simulation *s = direction->simulation;
   SimulationWait(s, direction->worker.event, UINT64_MAX);
-  uint64_t previous = UINT64_MAX;
   for (;;) {
     ReapParticipants(direction);
     SimulationLock(s);
@@ -260,18 +267,17 @@ void *DirectionRun(void *argument) {
       SimulationUnlock(s);
       break;
     }
-    if (s->tick != previous && (!s->cfg->ticks || s->tick < s->cfg->ticks)) {
+    if (s->tick >= direction->nextRandomTick &&
+        (!s->cfg->ticks || s->tick < s->cfg->ticks)) {
       const Stream *stream = &s->cfg->streams[direction->stream];
-      if (ParticipantRandom(s->cfg->seed, direction->stream, s->tick, false) <
-          stream->rate) {
-        ParticipantWorker *p = FreeParticipantLocked(s, direction);
-        if (!p && s->flows[direction->stream].count < stream->capacity) {
-          SimulationUnlock(s);
-          continue;
-        }
-        ArriveLocked(s, direction, p);
+      ParticipantWorker *p = FreeParticipantLocked(s, direction);
+      if (!p && s->flows[direction->stream].count < stream->capacity) {
+        SimulationUnlock(s);
+        continue;
       }
-      previous = s->tick;
+      bool emergency;
+      if (DirectionGenerateLocked(direction, s->tick, &emergency))
+        ArriveLocked(s, direction, p, emergency);
     }
     if (!SimulationCheckLocked(s))
       SimulationStopLocked(s, STOP_INVARIANT, 0);

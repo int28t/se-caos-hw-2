@@ -141,14 +141,64 @@ static void TestExpiredGreenAndStop(void) {
 }
 
 //------------------------------------------------------------------------------
+static unsigned GenerateLocked(DirectionWorker *direction, uint64_t tick) {
+  bool emergency;
+  bool arrived = DirectionGenerateLocked(direction, tick, &emergency);
+  return (arrived ? 1U : 0U) | (emergency ? 2U : 0U);
+}
+
+//------------------------------------------------------------------------------
 static void TestRandomSequence(void) {
-  bool changed = false;
-  for (uint64_t tick = 0; tick < 100; ++tick) {
-    unsigned value = ParticipantRandom(39, 2, tick, false);
-    CHECK(value < 1000 && value == ParticipantRandom(39, 2, tick, false));
-    changed |= value != ParticipantRandom(40, 2, tick, false);
+  Config cfg = TestConfig();
+  cfg.seed = 39;
+  cfg.emergencyRate = cfg.streams[0].rate = 500;
+  cfg.streamCount = 3;
+  cfg.streams[1] = cfg.streams[2] = cfg.streams[0];
+  Output out = {.logFd = -1};
+  Simulation first, second;
+  CHECK(SimulationInit(&first, &cfg, &out));
+  CHECK(SimulationInit(&second, &cfg, &out));
+  unsigned sequence[3][128];
+  SimulationLock(&first);
+  for (unsigned i = 0; i < 3; ++i)
+    for (uint64_t tick = 0; tick < 128; ++tick)
+      sequence[i][tick] = GenerateLocked(&first.directionThreads[i], tick);
+  SimulationUnlock(&first);
+
+  SimulationLock(&second);
+  bool differentStreams = false;
+  for (uint64_t tick = 0; tick < 128; ++tick) {
+    for (unsigned i = 3; i-- > 0;)
+      CHECK(GenerateLocked(&second.directionThreads[i], tick) ==
+            sequence[i][tick]);
+    differentStreams |= sequence[0][tick] != sequence[1][tick];
   }
+  CHECK(differentStreams);
+  SimulationUnlock(&second);
+  CHECK(SimulationDestroy(&second));
+
+  CHECK(SimulationInit(&second, &cfg, &out));
+  SimulationLock(&second);
+  const uint64_t ticks[] = {0, 1, 5, 64, 127};
+  for (unsigned i = 0; i < 3; ++i)
+    for (unsigned j = 0; j < sizeof(ticks) / sizeof(ticks[0]); ++j)
+      CHECK(GenerateLocked(&second.directionThreads[i], ticks[j]) ==
+            sequence[i][ticks[j]]);
+  SimulationUnlock(&second);
+  CHECK(SimulationDestroy(&second));
+
+  Config changedCfg = cfg;
+  changedCfg.seed = 40;
+  CHECK(SimulationInit(&second, &changedCfg, &out));
+  SimulationLock(&second);
+  bool changed = false;
+  for (uint64_t tick = 0; tick < 128; ++tick)
+    changed |=
+        GenerateLocked(&second.directionThreads[0], tick) != sequence[0][tick];
   CHECK(changed);
+  SimulationUnlock(&second);
+  CHECK(SimulationDestroy(&second));
+  CHECK(SimulationDestroy(&first));
 }
 
 //------------------------------------------------------------------------------

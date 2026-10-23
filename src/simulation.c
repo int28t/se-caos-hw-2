@@ -41,10 +41,10 @@ static void ParametersOutLocked(Simulation *s) {
       s,
       "Запуск: стратегия=%s минимум=%u максимум=%u интервал=%u seed=%u "
       "цель=%" PRIu64 " период=%" PRIu64
-      " приоритет=%u такт_мс=%u задержка_мс=%u",
+      " приоритет=%u экстренные=%u такт_мс=%u задержка_мс=%u",
       c->strategy == FIXED ? "fixed" : "adaptive", c->minGreen, c->maxGreen,
-      c->clearance, c->seed, c->target, c->ticks, c->priority, c->tickMs,
-      c->delayMs);
+      c->clearance, c->seed, c->target, c->ticks, c->priority, c->emergencyRate,
+      c->tickMs, c->delayMs);
   for (unsigned i = 0; i < c->streamCount; ++i) {
     const Stream *f = &c->streams[i];
     SimulationEventLocked(

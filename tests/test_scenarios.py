@@ -26,11 +26,24 @@ def read_events(text):
     return events
 
 
+def random_inputs(seed, stream, tick):
+    mask = (1 << 64) - 1
+    initial = (seed << 32) | stream
+    values = []
+    for offset in (1, 2):
+        value = (initial + (2 * tick + offset) * 0x9E3779B97F4A7C15) & mask
+        value = ((value ^ (value >> 30)) * 0xBF58476D1CE4E5B9) & mask
+        value = ((value ^ (value >> 27)) * 0x94D049BB133111EB) & mask
+        values.append((value ^ (value >> 31)) % 1000)
+    return values
+
+
 def verify(events):
     run = events[0][2]
     streams, phases, queues, active, arrivals = {}, {}, {}, {}, {}
     green, permits, refused, completed = set(), set(), set(), set()
     waits, peaks = collections.defaultdict(list), collections.defaultdict(int)
+    arrival_ticks = {}
     opened, clearance, closed, previous_time = 0, None, False, 0
     unit = run["такт_мс"] * 1_000_000
     snapshot = None
@@ -71,8 +84,14 @@ def verify(events):
             assert not active and not green
             clearance = now
         elif event == "Прибытие":
-            assert ident not in arrivals
+            assert ident == len(arrivals) + 1
             assert not run["период"] or now < run["период"] * unit
+            assert tick > arrival_ticks.get(name, -1)
+            arrival_ticks[name] = tick
+            stream = streams[name]
+            arrival, emergency = random_inputs(run["seed"], list(streams).index(name), tick)
+            assert arrival < stream["интенсивность"]
+            assert data["экстренный"] == (stream["тип"] == "car" and emergency < run["экстренные"])
             arrivals[ident] = (name, now)
         elif event == "Очередь":
             assert arrivals[ident][0] == name
@@ -177,6 +196,18 @@ class Scenarios(unittest.TestCase):
         summary, _, _ = self.run_model(text=text)
         self.assertEqual(summary["прошло"], 100)
         self.assertGreaterEqual(summary["потоков"], 100)
+
+    def test_journal_with_many_directions(self):
+        names = [f"A{i}" for i in range(8)]
+        lines = ["ticks 60", "tick_ms 2", "emergency_rate 400"]
+        lines += [f"stream {name} car north straight 2 1 700" for name in names]
+        lines += [f"conflict {a} {b} 0" for i, a in enumerate(names) for b in names[i + 1:]]
+        lines.append("phase all " + " ".join(names))
+        summary, events, _ = self.run_model(text="\n".join(lines))
+        self.assertGreater(summary["прибыло"], 0)
+        self.assertEqual(len({d["поток"] for _, e, d in events if e == "Прибытие"}), 8)
+        simultaneous = collections.Counter(d["время_нс"] for _, _, d in events)
+        self.assertGreater(max(simultaneous.values()), 1)
 
     def test_delay_does_not_replace_crossing_time(self):
         text = ("ticks 0\ntarget 3\ntick_ms 5\ndelay_ms 60000\n"

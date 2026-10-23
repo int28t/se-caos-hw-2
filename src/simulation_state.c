@@ -72,6 +72,7 @@ bool SimulationInit(Simulation *s, const Config *cfg, Output *out) {
     DirectionWorker *direction = &s->directionThreads[i];
     direction->simulation = s;
     direction->stream = i;
+    direction->randomState = ((uint64_t)cfg->seed << 32) | i;
     direction->firstParticipant = s->participantLimit;
     direction->participantLimit = cfg->streams[i].capacity + 1;
     for (unsigned j = 0; j < direction->participantLimit; ++j) {
