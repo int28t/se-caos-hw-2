@@ -14,6 +14,7 @@ set(SIMULATION_SOURCES
     src/simulation.c
     src/simulation_state.c
     src/simulation_time.c
+    src/controller.c
     src/participants.c
 )
 

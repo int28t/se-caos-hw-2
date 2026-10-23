@@ -77,13 +77,14 @@ void SimulationLock(Simulation *s);
 void SimulationUnlock(Simulation *s);
 // Вызываются с захваченным mutex; ожиданий и захвата mutex внутри нет.
 bool SimulationCheckLocked(const Simulation *s);
+unsigned SimulationQueueCountLocked(const Simulation *s);
 bool SimulationStopLocked(Simulation *s, StopReason reason, int signalNumber);
 const char *SimulationStopName(StopReason reason);
 
 bool SimulationStartTimeLocked(Simulation *s);
 bool SimulationUpdateLocked(Simulation *s);
-// deadlineNs отсчитывается от начала модели; UINT64_MAX означает ожидание
-// события.
+// UINT64_MAX означает ожидание события; при конечном сроке event может быть
+// NULL.
 bool SimulationWait(Simulation *s, sem_t *event, uint64_t deadlineNs);
 void SimulationEventLocked(Simulation *s, const char *format, ...);
 void SimulationNotifyLocked(Simulation *s, Worker *worker);
@@ -93,6 +94,7 @@ unsigned ParticipantRandom(unsigned seed, unsigned stream, uint64_t tick,
                            bool emergency);
 void *DirectionRun(void *argument);
 void *ParticipantRun(void *argument);
+void *ControllerRun(void *argument);
 void ParticipantJoin(Simulation *s, ParticipantWorker *participant);
 
 #endif // SIMULATION_H

@@ -61,6 +61,7 @@ def verify(events):
                 assert name not in active
                 green.discard(name)
         elif event == "Въезд закрыт":
+            assert data["пересекают"] == len(active)
             assert now - opened >= run["минимум"] * unit
             closed = True
         elif event == "Конец фазы":

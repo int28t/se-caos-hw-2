@@ -229,6 +229,14 @@ bool SimulationStopLocked(Simulation *s, StopReason reason, int signalNumber) {
 }
 
 //------------------------------------------------------------------------------
+unsigned SimulationQueueCountLocked(const Simulation *s) {
+  unsigned count = 0;
+  for (unsigned i = 0; i < s->cfg->streamCount; ++i)
+    count += s->flows[i].count;
+  return count;
+}
+
+//------------------------------------------------------------------------------
 bool SimulationCheckLocked(const Simulation *s) {
   if (s->controllerThread.finished && !s->controllerThread.started)
     return false;

@@ -65,12 +65,14 @@ bool SimulationWait(Simulation *s, sem_t *event, uint64_t deadlineNs) {
         return false;
       if (!remaining)
         return true;
-      if (sem_trywait(event) == 0)
-        return true;
-      if (errno == EINTR)
-        continue;
-      if (errno != EAGAIN)
-        break;
+      if (event) {
+        if (sem_trywait(event) == 0)
+          return true;
+        if (errno == EINTR)
+          continue;
+        if (errno != EAGAIN)
+          break;
+      }
       struct timespec delay = {
           .tv_nsec = (long)(remaining < 1000000 ? remaining : 1000000)};
       if (nanosleep(&delay, NULL) < 0 && errno != EINTR)

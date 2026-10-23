@@ -93,7 +93,7 @@ void OutputEvent(Output *out, uint64_t tick, const char *description);
 // Загрузка параметров и проверка совместимости фаз.
 bool ConfigLoad(Config *cfg, const char *path);
 bool ConfigValidate(const Config *cfg);
-// Запуск направлений и участников; контроллер работает в главном потоке.
+// Запуск контроллера, направлений и участников.
 int SimulationRun(const Config *cfg, Output *out);
 
 #endif // CROSSROAD_H
