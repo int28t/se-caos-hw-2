@@ -1,0 +1,243 @@
+#!/usr/bin/env python3
+"""Независимое восстановление событий текстового журнала."""
+import collections
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+
+from check_log import read_events, verify
+
+ROOT = Path(__file__).resolve().parents[1]
+BINARY = Path(sys.argv.pop(1)).resolve()
+
+
+class Scenarios(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.directory = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_model(self, scenario="demo", extra="", expected=0, text=None):
+        source = (ROOT / "data" / (scenario + ".conf")).read_text() if text is None else text
+        config, journal = self.directory / "input.conf", self.directory / "output.log"
+        config.write_text(source + "\n" + extra)
+        result = subprocess.run([str(BINARY), str(config), str(journal)], capture_output=True,
+                                text=True, timeout=10)
+        self.assertEqual(result.returncode, expected, result.stderr)
+        if expected not in (0, 3):
+            return result
+        self.assertEqual(result.stdout, journal.read_text())
+        events = read_events(result.stdout)
+        return verify(events), events, result.stdout
+
+    def test_small_queues_and_overflow(self):
+        summary, _, _ = self.run_model("hand", extra="tick_ms 5\nticks 40")
+        self.assertGreater(summary["отказов"], 0)
+        self.assertGreater(summary["прошло"], 0)
+
+    def test_both_strategies_and_seeds(self):
+        for strategy in ("fixed", "adaptive"):
+            for seed in range(6):
+                self.run_model(extra=f"strategy {strategy}\nseed {seed}\nticks 80")
+
+    def test_participant_slots_are_reused(self):
+        text = ("ticks 0\ntarget 100\ntick_ms 2\npriority 0\n"
+                "min_green 2\nmax_green 4\nclearance 1\n"
+                "stream A car north straight 1 1 1000\nphase a A\n")
+        summary, _, _ = self.run_model(text=text)
+        self.assertEqual(summary["прошло"], 100)
+        self.assertGreaterEqual(summary["потоков"], 100)
+
+    def test_journal_with_many_directions(self):
+        names = [f"A{i}" for i in range(8)]
+        lines = ["ticks 60", "tick_ms 2", "emergency_rate 400"]
+        lines += [f"stream {name} car north straight 2 1 700" for name in names]
+        lines += [f"conflict {a} {b} 0" for i, a in enumerate(names) for b in names[i + 1:]]
+        lines.append("phase all " + " ".join(names))
+        summary, events, _ = self.run_model(text="\n".join(lines))
+        self.assertGreater(summary["прибыло"], 0)
+        self.assertEqual(len({d["поток"] for _, e, d in events if e == "Прибытие"}), 8)
+        simultaneous = collections.Counter(d["время_нс"] for _, _, d in events)
+        self.assertGreater(max(simultaneous.values()), 1)
+
+    def test_delay_does_not_replace_crossing_time(self):
+        text = ("ticks 0\ntarget 3\ntick_ms 5\ndelay_ms 60000\n"
+                "stream A car north straight 2 1 1000\nphase a A\n")
+        summary, events, _ = self.run_model(text=text)
+        self.assertEqual(summary["прошло"], 3)
+        self.assertEqual(sum(e == "Состояние" for _, e, _ in events), 1)
+
+    def test_crossing_as_long_as_green(self):
+        text = ("ticks 0\ntarget 2\ntick_ms 10\npriority 0\n"
+                "min_green 2\nmax_green 2\nclearance 1\n"
+                "stream A car north straight 2 2 1000\nphase a A\n")
+        self.assertEqual(self.run_model(text=text)[0]["прошло"], 2)
+
+    def test_target_and_empty_data(self):
+        summary, events, _ = self.run_model(extra="ticks 0\ntarget 30")
+        self.assertEqual(summary["прошло"], 30)
+        self.assertEqual(summary["в_зоне"], 0)
+        self.assertEqual(next(d["причина"] for _, e, d in events if e == "Завершение"), "цель")
+        empty = "stream A car north straight 1 1 0\nphase a A\n"
+        self.assertEqual(self.run_model(text=empty)[0]["прибыло"], 0)
+        self.run_model(text=empty, extra="ticks 0\ntarget 1", expected=3)
+
+    def test_target_reserves_parallel_crossings(self):
+        text = ("ticks 0\ntick_ms 5\npriority 0\nmin_green 1\nmax_green 4\n"
+                "stream N car north straight 2 2 1000\n"
+                "stream S car south straight 2 2 1000\n"
+                "conflict N S 0\nphase both N S\n")
+        for target in (1, 2, 5):
+            summary, _, _ = self.run_model(text=text, extra=f"target {target}")
+            self.assertEqual(summary["прошло"], target)
+            self.assertEqual(summary["в_зоне"], 0)
+
+    def test_period_freezes_unfinished_crossings(self):
+        text = ("ticks 10\ntick_ms 20\nmax_green 1000\n"
+                "stream A car north straight 2 1000 1000\nphase a A\n")
+        summary, events, _ = self.run_model(text=text)
+        self.assertEqual(summary["прошло"], 0)
+        self.assertEqual(summary["в_зоне"], 1)
+        self.assertGreater(summary["ожидают"], 0)
+        self.assertEqual(next(d["причина"] for _, e, d in events if e == "Завершение"), "период")
+
+    def test_safe_priority_and_adaptive_response(self):
+        extra = "tick_ms 10\nticks 50\nmax_green 6"
+        _, priority, _ = self.run_model("emergency", extra=extra)
+        _, normal, _ = self.run_model("emergency", extra=extra + "\npriority 0")
+        _, adaptive, _ = self.run_model("emergency", extra=extra + "\npriority 0\nstrategy adaptive")
+        def phases(events):
+            return [d["имя"] for _, e, d in events if e == "Начало фазы"]
+        self.assertEqual(phases(normal)[:3], ["cars_A", "pedestrians", "cars_B"])
+        self.assertEqual(phases(priority)[1], "cars_B")
+        self.assertEqual(phases(adaptive)[1], "cars_B")
+
+    def test_compatible_streams(self):
+        _, events, _ = self.run_model("compatible", extra="tick_ms 10\nticks 12")
+        active, overlap = set(), False
+        for _, event, data in events:
+            if event == "Въезд":
+                active.add(data["поток"])
+                overlap |= len(active) > 1
+            elif event == "Выход":
+                active.remove(data["поток"])
+        self.assertTrue(overlap, "Совместимые направления не пересекались одновременно")
+
+    def test_saturated_conflicting_directions(self):
+        text = ("ticks 100\ntick_ms 2\npriority 0\nmin_green 2\nmax_green 5\n"
+                "stream N car north straight 3 2 1000\n"
+                "stream S car south straight 3 2 1000\n"
+                "stream E car east straight 3 2 1000\n"
+                "stream W car west straight 3 2 1000\n"
+                "conflict N S 0\nconflict E W 0\n"
+                "phase NS N S\nphase EW E W\n")
+        for strategy in ("fixed", "adaptive"):
+            summary, _, _ = self.run_model(text=text, extra=f"strategy {strategy}")
+            self.assertGreater(summary["отказов"], 0)
+            self.assertGreater(summary["прошло"], 0)
+
+    def test_invalid_input_and_cli(self):
+        prefix = "stream A car north straight 2 2 0\nphase a A\n"
+        for text in ("", "unknown 1", prefix + "min_green 5\nmax_green 4",
+                     prefix + "clearance 0", prefix + "tick_ms 0", prefix + "tick_ms 60001", prefix + "seed -1", prefix + "ticks 1e2",
+                     prefix + "stream A car east left 1 1 0", prefix + "phase b missing",
+                     "stream X car north walk 1 1 0\nphase x X", prefix + "conflict A A 0",
+                     "stream A car north straight 65 1 0\nphase a A",
+                     "stream A car north straight 1 1 0\nstream B car east left 1 1 0\nphase unsafe A B"):
+            with self.subTest(text=text):
+                self.run_model(text=text, expected=2)
+        for args, expected in (([], 2), (["--help"], 0), (["/no-such-config"], 2), (["a", "b", "c"], 2)):
+            result = subprocess.run([str(BINARY)] + args, capture_output=True, timeout=3)
+            self.assertEqual(result.returncode, expected)
+        self.run_model(text=prefix.replace("\n", "\r\n").rstrip())
+
+    def test_file_boundaries_and_input_protection(self):
+        names = [f"S{i:02d}_" + "x" * 27 for i in range(16)]
+        lines = ["ticks 65"] + [f"stream {name} car north straight 64 1 0" for name in names]
+        lines += [f"phase P{i} {name}" for i, name in enumerate(names)]
+        self.run_model(text="\n".join(lines))
+        config = self.directory / "input.conf"
+        for contents in (b"#" * 16385, b"stream A\0"):
+            config.write_bytes(contents)
+            result = subprocess.run([str(BINARY), str(config)], capture_output=True, timeout=3)
+            self.assertEqual(result.returncode, 2)
+        config.write_text((ROOT / "data/demo.conf").read_text())
+        alias = self.directory / "alias.conf"
+        os.link(config, alias)
+        original = config.read_bytes()
+        result = subprocess.run([str(BINARY), str(config), str(alias)], capture_output=True, timeout=3)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(config.read_bytes(), original)
+
+    def test_signal_completion(self):
+        cases = (
+            ("green", "max_green 1000\nstream A car north straight 2 1000 1000\nphase a A\n",
+             "Въезд:", 1),
+            ("drain", "min_green 2\nmax_green 10\nemergency_rate 1000\n"
+             "stream A car north straight 4 10 1000\n"
+             "stream B car east left 4 1 1000\nphase a A\nphase b B\n",
+             "Въезд закрыт: фаза=a пересекают=1", 1),
+            ("clearance", "min_green 1\nmax_green 2\nclearance 20\n"
+             "stream A car north straight 2 1 1000\nphase a A\n",
+             "Интервал:", 0),
+        )
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            for state, contents, marker, active in cases:
+                with self.subTest(signal=sig, state=state):
+                    config, journal = self.directory / "input.conf", self.directory / "signal.log"
+                    journal.unlink(missing_ok=True)
+                    config.write_text("ticks 0\ntick_ms 20\n" + contents)
+                    with subprocess.Popen([str(BINARY), str(config), str(journal)], stdout=subprocess.DEVNULL,
+                                          stderr=subprocess.PIPE, text=True) as process:
+                        deadline = time.monotonic() + 5
+                        while time.monotonic() < deadline:
+                            text = journal.read_bytes() if journal.exists() else b""
+                            if marker.encode() in text and text.count("Очередь:".encode()) >= 2:
+                                break
+                            if process.poll() is not None:
+                                _, stderr = process.communicate()
+                                self.fail(stderr)
+                            time.sleep(0.001)
+                        else:
+                            process.kill()
+                            self.fail(f"Модель не достигла {state}")
+                        for _ in range(5):
+                            process.send_signal(sig)
+                        _, stderr = process.communicate(timeout=3)
+                        self.assertEqual(process.returncode, 128 + sig, stderr)
+                        events = read_events(journal.read_text())
+                        summary = verify(events)
+                        self.assertEqual(summary["в_зоне"], active)
+                        self.assertEqual(next(d["причина"] for _, e, d in events if e == "Завершение"), "прерывание")
+
+    def test_closed_stdout_preserves_log(self):
+        journal = self.directory / "closed.log"
+        read_fd, write_fd = os.pipe()
+        os.close(read_fd)
+        try:
+            result = subprocess.run([str(BINARY), str(ROOT / "data/demo.conf"), str(journal)],
+                                    stdout=write_fd, stderr=subprocess.PIPE, timeout=3)
+        finally:
+            os.close(write_fd)
+        self.assertEqual(result.returncode, 1)
+        events = read_events(journal.read_text())
+        verify(events)
+        self.assertEqual(next(d["причина"] for _, e, d in events if e == "Завершение"), "ошибка_вывода")
+
+    @unittest.skipUnless(Path("/dev/full").exists(), "/dev/full доступен в Linux")
+    def test_log_failure_preserves_console(self):
+        result = subprocess.run([str(BINARY), str(ROOT / "data/demo.conf"), "/dev/full"],
+                                capture_output=True, text=True, timeout=3)
+        self.assertEqual(result.returncode, 1)
+        verify(read_events(result.stdout))
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
