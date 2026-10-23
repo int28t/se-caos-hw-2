@@ -6,41 +6,30 @@ set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 
+find_package(Threads REQUIRED)
+
 add_executable(crossroad
     src/main.c
     src/config.c
     src/io.c
     src/simulation.c
+    src/simulation_state.c
 )
-
-target_compile_definitions(crossroad PRIVATE
-    _POSIX_C_SOURCE=200809L
-)
-
-target_compile_options(crossroad PRIVATE
-    -Wall
-    -Wextra
-    -Wpedantic
-    -Wconversion
-    -Wshadow
-)
-
-option(ENABLE_SANITIZERS
-    "Enable AddressSanitizer and UndefinedBehaviorSanitizer"
-    OFF
-)
-
-if(ENABLE_SANITIZERS AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(crossroad PRIVATE
-        -fsanitize=address,undefined
-        -fno-omit-frame-pointer
-    )
-    target_link_options(crossroad PRIVATE -fsanitize=address,undefined)
-endif()
 
 include(CTest)
 
+set(CROSSROAD_TARGETS crossroad)
+
 if(BUILD_TESTING)
+    add_executable(state_test
+        tests/test_state.c
+        src/simulation_state.c
+    )
+    target_include_directories(state_test PRIVATE src)
+    list(APPEND CROSSROAD_TARGETS state_test)
+    add_test(NAME state COMMAND state_test)
+    set_tests_properties(state PROPERTIES TIMEOUT 15)
+
     find_package(Python3 COMPONENTS Interpreter)
 
     if(Python3_FOUND)
@@ -52,3 +41,30 @@ if(BUILD_TESTING)
         set_tests_properties(scenarios PROPERTIES TIMEOUT 60)
     endif()
 endif()
+
+option(ENABLE_SANITIZERS
+    "Enable AddressSanitizer and UndefinedBehaviorSanitizer"
+    OFF
+)
+
+foreach(target IN LISTS CROSSROAD_TARGETS)
+    target_link_libraries(${target} PRIVATE Threads::Threads)
+    target_compile_definitions(${target} PRIVATE
+        _POSIX_C_SOURCE=200809L
+    )
+    target_compile_options(${target} PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+        -Wconversion
+        -Wshadow
+    )
+
+    if(ENABLE_SANITIZERS AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(${target} PRIVATE
+            -fsanitize=address,undefined
+            -fno-omit-frame-pointer
+        )
+        target_link_options(${target} PRIVATE -fsanitize=address,undefined)
+    endif()
+endforeach()
