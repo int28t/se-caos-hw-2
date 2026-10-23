@@ -104,6 +104,7 @@ static void TestStopAndJoin(void) {
     CHECK(contexts[i].worker->finished);
     contexts[i].worker->started = contexts[i].worker->finished = false;
   }
+  s.participants[0].participantId = 0;
   s.participantCount = 0;
   CHECK(s.participantsCreated == 1 && SimulationCheckLocked(&s));
   SimulationUnlock(&s);
@@ -128,6 +129,9 @@ static void TestInvariants(void) {
   CHECK(!SimulationCheckLocked(&s));
   s.participantCount = 0;
   CHECK(SimulationCheckLocked(&s));
+  s.participants[0].participantId = 1;
+  CHECK(!SimulationCheckLocked(&s));
+  s.participants[0].participantId = 0;
   s.tick = 3;
   s.nowNs = 3 * s.tickNs;
   s.controller.signals = 1;

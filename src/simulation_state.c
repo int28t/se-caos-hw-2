@@ -278,11 +278,11 @@ bool SimulationCheckLocked(const Simulation *s) {
   }
   for (unsigned i = 0; i < s->participantLimit; ++i) {
     const ParticipantWorker *participant = &s->participants[i];
-    if (participant->worker.finished && !participant->worker.started)
+    if ((participant->worker.finished && !participant->worker.started) ||
+        (participant->worker.started != (participant->participantId != 0)))
       return false;
     if (participant->worker.started) {
-      if (!participant->participantId ||
-          participant->stream >= s->cfg->streamCount)
+      if (participant->stream >= s->cfg->streamCount)
         return false;
       ++participants;
     }

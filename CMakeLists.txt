@@ -40,6 +40,18 @@ if(BUILD_TESTING)
     add_test(NAME participants COMMAND participants_test)
     set_tests_properties(participants PROPERTIES TIMEOUT 15)
 
+    add_executable(lifecycle_test tests/test_lifecycle.c ${SIMULATION_SOURCES})
+    target_include_directories(lifecycle_test PRIVATE src)
+    target_compile_definitions(lifecycle_test PRIVATE
+        pthread_create=TestThreadCreate
+        pthread_join=TestThreadJoin
+        sem_open=TestSemOpen
+        sem_close=TestSemClose
+    )
+    list(APPEND CROSSROAD_TARGETS lifecycle_test)
+    add_test(NAME lifecycle COMMAND lifecycle_test)
+    set_tests_properties(lifecycle PROPERTIES TIMEOUT 30)
+
     find_package(Python3 COMPONENTS Interpreter)
 
     if(Python3_FOUND)
