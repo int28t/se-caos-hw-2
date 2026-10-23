@@ -8,6 +8,7 @@ __pycache__/
 *.pyc
 .DS_Store
 /crossroad.log
+*.tex
 
 # Промежуточные файлы LaTeX.
 /docs/*.aux
