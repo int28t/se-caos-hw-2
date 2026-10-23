@@ -1,0 +1,19 @@
+# Продукты сборки и временные файлы.
+/build*/
+/tmp/
+*.log
+*.o
+*.dSYM/
+__pycache__/
+*.pyc
+.DS_Store
+/crossroad.log
+
+# Промежуточные файлы LaTeX.
+/docs/*.aux
+/docs/*.log
+/docs/*.out
+/docs/*.toc
+/docs/*.fls
+/docs/*.fdb_latexmk
+/docs/*.synctex.gz
