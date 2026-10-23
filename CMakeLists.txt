@@ -8,13 +8,16 @@ set(CMAKE_C_EXTENSIONS OFF)
 
 find_package(Threads REQUIRED)
 
-add_executable(crossroad
-    src/main.c
+set(SIMULATION_SOURCES
     src/config.c
     src/io.c
     src/simulation.c
     src/simulation_state.c
+    src/simulation_time.c
+    src/participants.c
 )
+
+add_executable(crossroad src/main.c ${SIMULATION_SOURCES})
 
 include(CTest)
 
@@ -29,6 +32,12 @@ if(BUILD_TESTING)
     list(APPEND CROSSROAD_TARGETS state_test)
     add_test(NAME state COMMAND state_test)
     set_tests_properties(state PROPERTIES TIMEOUT 15)
+
+    add_executable(participants_test tests/test_participants.c ${SIMULATION_SOURCES})
+    target_include_directories(participants_test PRIVATE src)
+    list(APPEND CROSSROAD_TARGETS participants_test)
+    add_test(NAME participants COMMAND participants_test)
+    set_tests_properties(participants PROPERTIES TIMEOUT 15)
 
     find_package(Python3 COMPONENTS Interpreter)
 

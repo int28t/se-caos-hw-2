@@ -19,7 +19,8 @@ typedef enum StopReason {
   STOP_EXHAUSTED,
   STOP_UNREACHABLE,
   STOP_OUTPUT_ERROR,
-  STOP_INVARIANT
+  STOP_INVARIANT,
+  STOP_RUNTIME_ERROR
 } StopReason;
 
 // event не меняется после инициализации; остальные поля защищены mutex модели.
@@ -30,14 +31,22 @@ typedef struct Worker {
   bool started, finished;
 } Worker;
 
-// Запись не перемещается и не переиспользуется до pthread_join.
+typedef struct Simulation Simulation;
+
 typedef struct ParticipantWorker {
   Worker worker;
+  Simulation *simulation;
   uint64_t participantId;
   unsigned stream;
 } ParticipantWorker;
 
-typedef struct Simulation {
+typedef struct DirectionWorker {
+  Worker worker;
+  Simulation *simulation;
+  unsigned stream, firstParticipant, participantLimit;
+} DirectionWorker;
+
+struct Simulation {
   // Задаются до запуска потоков и не меняются до их завершения.
   const Config *cfg;
   Output *out;
@@ -48,16 +57,17 @@ typedef struct Simulation {
   Flow flows[MAX_STREAMS];
   Controller controller;
   uint64_t tick, nextId, passed;
+  uint64_t startNs, nowNs, tickNs, eventNumber;
   unsigned active;
   StopReason stopReason;
   int signalNumber, status;
 
   Worker controllerThread;
-  Worker directionThreads[MAX_STREAMS];
+  DirectionWorker directionThreads[MAX_STREAMS];
   ParticipantWorker participants[MAX_PARTICIPANTS];
   uint64_t participantsCreated;
   unsigned participantCount;
-} Simulation;
+};
 
 // Инициализация до публикации состояния; уничтожение только после всех join.
 bool SimulationInit(Simulation *s, const Config *cfg, Output *out);
@@ -69,5 +79,20 @@ void SimulationUnlock(Simulation *s);
 bool SimulationCheckLocked(const Simulation *s);
 bool SimulationStopLocked(Simulation *s, StopReason reason, int signalNumber);
 const char *SimulationStopName(StopReason reason);
+
+bool SimulationStartTimeLocked(Simulation *s);
+bool SimulationUpdateLocked(Simulation *s);
+// deadlineNs отсчитывается от начала модели; UINT64_MAX означает ожидание
+// события.
+bool SimulationWait(Simulation *s, sem_t *event, uint64_t deadlineNs);
+void SimulationEventLocked(Simulation *s, const char *format, ...);
+void SimulationNotifyLocked(Simulation *s, Worker *worker);
+void SimulationWakeHeadsLocked(Simulation *s);
+
+unsigned ParticipantRandom(unsigned seed, unsigned stream, uint64_t tick,
+                           bool emergency);
+void *DirectionRun(void *argument);
+void *ParticipantRun(void *argument);
+void ParticipantJoin(Simulation *s, ParticipantWorker *participant);
 
 #endif // SIMULATION_H

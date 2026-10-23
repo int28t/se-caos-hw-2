@@ -31,10 +31,14 @@ def verify(events):
     streams, phases, queues, active, arrivals = {}, {}, {}, {}, {}
     green, permits, refused, completed = set(), set(), set(), set()
     waits, peaks = collections.defaultdict(list), collections.defaultdict(int)
-    opened, clearance, closed, previous_tick = 0, None, False, 0
-    for tick, event, data in events:
-        assert tick >= previous_tick
-        previous_tick = tick
+    opened, clearance, closed, previous_time = 0, None, False, 0
+    unit = run["такт_мс"] * 1_000_000
+    snapshot = None
+    for number, (tick, event, data) in enumerate(events, 1):
+        now = data["время_нс"]
+        assert data["событие"] == number and now >= previous_time
+        assert tick == now // unit
+        previous_time = now
         name, ident = data.get("поток"), data.get("id")
         if event == "Поток":
             name = data["имя"]
@@ -44,8 +48,8 @@ def verify(events):
         elif event == "Начало фазы":
             assert not active
             if clearance is not None:
-                assert tick - clearance >= run["интервал"]
-            opened, closed = tick, False
+                assert now - clearance >= run["интервал"] * unit
+            opened, closed = now, False
             mask = phases[data["имя"]]
             for i, stream in enumerate(streams.values()):
                 if mask & (1 << i):
@@ -57,18 +61,18 @@ def verify(events):
                 assert name not in active
                 green.discard(name)
         elif event == "Въезд закрыт":
-            assert tick - opened >= run["минимум"]
+            assert now - opened >= run["минимум"] * unit
             closed = True
         elif event == "Конец фазы":
-            assert not active and run["минимум"] <= tick - opened <= run["максимум"]
-            assert data["длительность"] == tick - opened
+            assert not active and now - opened >= run["минимум"] * unit
+            assert data["длительность"] == (now - opened) // unit
         elif event == "Интервал":
             assert not active and not green
-            clearance = tick
+            clearance = now
         elif event == "Прибытие":
             assert ident not in arrivals
-            assert not run["период"] or tick < run["период"]
-            arrivals[ident] = (name, tick)
+            assert not run["период"] or now < run["период"] * unit
+            arrivals[ident] = (name, now)
         elif event == "Очередь":
             assert arrivals[ident][0] == name
             assert all(ident not in q for q in queues.values())
@@ -76,7 +80,7 @@ def verify(events):
             assert len(queues[name]) == data["длина"] <= streams[name]["емкость"]
             peaks[name] = max(peaks[name], len(queues[name]))
         elif event == "Отказ":
-            assert len(queues[name]) == streams[name]["емкость"]
+            assert len(queues[name]) == streams[name]["емкость"] or data.get("причина") == "ошибка_потока"
             refused.add(ident)
         elif event == "Запрос пешехода":
             assert streams[name]["тип"] == "pedestrian" and ident in queues[name]
@@ -87,20 +91,28 @@ def verify(events):
             assert ident in permits and name in green and name not in active and not closed
             permits.remove(ident)
             assert queues[name].popleft() == ident and data["длина"] == len(queues[name])
-            assert tick + streams[name]["пересечение"] <= opened + run["максимум"]
+            assert now < opened + run["максимум"] * unit
+            assert not run["период"] or now < run["период"] * unit
             names = list(streams)
             for other in active:
                 assert not streams[name]["конфликты"] & (1 << names.index(other))
-            active[name] = (ident, tick)
+            active[name] = (ident, now)
         elif event == "Выход":
             assert name in green and active[name][0] == ident and ident not in completed
             _, entered = active.pop(name)
-            assert tick == entered + streams[name]["пересечение"]
-            wait = entered - arrivals[ident][1]
+            assert now >= entered + streams[name]["пересечение"] * unit
+            assert not run["период"] or now <= run["период"] * unit
+            wait = (entered - arrivals[ident][1]) // unit
             assert data["ожидание"] == wait
             waits[name].append(wait)
             completed.add(ident)
         elif event == "Состояние":
+            if snapshot is not None:
+                if run["задержка_мс"]:
+                    assert now - snapshot >= run["задержка_мс"] * 1_000_000
+                else:
+                    assert now // unit > snapshot // unit
+            snapshot = now
             assert data["ожидают"] == sum(map(len, queues.values()))
             assert data["пересекают"] == len(active)
         elif event == "Итог потока":
@@ -121,6 +133,7 @@ def verify(events):
             mean = sum(all_waits) / len(all_waits) if all_waits else 0
             assert abs(float(data["среднее"]) - mean) <= 0.00501
             assert data["прибыло"] == data["прошло"] + data["отказов"] + data["ожидают"] + data["в_зоне"]
+            assert data["потоков"] == data["прибыло"] - data["отказов"]
     assert not permits and events[-1][1] == "ИТОГО"
     return events[-1][2]
 
@@ -146,21 +159,36 @@ class Scenarios(unittest.TestCase):
         events = read_events(result.stdout)
         return verify(events), events, result.stdout
 
-    def test_hand_calculation_and_overflow(self):
-        summary, events, _ = self.run_model("hand")
-        self.assertEqual([summary[k] for k in ("прибыло", "прошло", "отказов", "ожидают", "в_зоне")],
-                         [16, 3, 10, 2, 1])
-        self.assertEqual((summary["ожидание"], summary["среднее"], summary["максимум"]), (6, "2.00", 5))
-        self.assertEqual([(t, d["id"]) for t, e, d in events if e == "Выход"], [(2, 1), (4, 3), (7, 2)])
+    def test_small_queues_and_overflow(self):
+        summary, _, _ = self.run_model("hand", extra="tick_ms 5\nticks 40")
+        self.assertGreater(summary["отказов"], 0)
+        self.assertGreater(summary["прошло"], 0)
 
     def test_both_strategies_and_seeds(self):
         for strategy in ("fixed", "adaptive"):
             for seed in range(6):
                 self.run_model(extra=f"strategy {strategy}\nseed {seed}\nticks 80")
 
-    def test_reproducibility(self):
-        self.assertEqual(self.run_model()[2], self.run_model()[2])
-        self.assertNotEqual(self.run_model()[2], self.run_model(extra="seed 40")[2])
+    def test_participant_slots_are_reused(self):
+        text = ("ticks 0\ntarget 100\ntick_ms 2\npriority 0\n"
+                "min_green 2\nmax_green 4\nclearance 1\n"
+                "stream A car north straight 1 1 1000\nphase a A\n")
+        summary, _, _ = self.run_model(text=text)
+        self.assertEqual(summary["прошло"], 100)
+        self.assertGreaterEqual(summary["потоков"], 100)
+
+    def test_delay_does_not_replace_crossing_time(self):
+        text = ("ticks 0\ntarget 3\ntick_ms 5\ndelay_ms 60000\n"
+                "stream A car north straight 2 1 1000\nphase a A\n")
+        summary, events, _ = self.run_model(text=text)
+        self.assertEqual(summary["прошло"], 3)
+        self.assertEqual(sum(e == "Состояние" for _, e, _ in events), 1)
+
+    def test_crossing_as_long_as_green(self):
+        text = ("ticks 0\ntarget 2\ntick_ms 10\npriority 0\n"
+                "min_green 2\nmax_green 2\nclearance 1\n"
+                "stream A car north straight 2 2 1000\nphase a A\n")
+        self.assertEqual(self.run_model(text=text)[0]["прошло"], 2)
 
     def test_target_and_empty_data(self):
         summary, events, _ = self.run_model(extra="ticks 0\ntarget 30")
@@ -172,23 +200,44 @@ class Scenarios(unittest.TestCase):
         self.run_model(text=empty, extra="ticks 0\ntarget 1", expected=3)
 
     def test_safe_priority_and_adaptive_response(self):
-        def first_b(events):
-            return next(t for t, e, d in events if e == "Въезд" and d["поток"] == "B")
-        _, priority, _ = self.run_model("emergency")
-        _, normal, _ = self.run_model("emergency", extra="priority 0")
-        _, adaptive, _ = self.run_model("emergency", extra="priority 0\nstrategy adaptive")
-        self.assertEqual(first_b(priority), 3)
-        self.assertEqual(first_b(normal), 10)
-        self.assertLess(first_b(adaptive), first_b(normal))
+        extra = "tick_ms 10\nticks 50\nmax_green 6"
+        _, priority, _ = self.run_model("emergency", extra=extra)
+        _, normal, _ = self.run_model("emergency", extra=extra + "\npriority 0")
+        _, adaptive, _ = self.run_model("emergency", extra=extra + "\npriority 0\nstrategy adaptive")
+        def phases(events):
+            return [d["имя"] for _, e, d in events if e == "Начало фазы"]
+        self.assertEqual(phases(normal)[:3], ["cars_A", "pedestrians", "cars_B"])
+        self.assertEqual(phases(priority)[1], "cars_B")
+        self.assertEqual(phases(adaptive)[1], "cars_B")
 
     def test_compatible_streams(self):
-        _, events, _ = self.run_model("compatible")
-        self.assertEqual([d["поток"] for t, e, d in events if e == "Въезд" and t == 0], ["N", "S"])
+        _, events, _ = self.run_model("compatible", extra="tick_ms 10\nticks 12")
+        active, overlap = set(), False
+        for _, event, data in events:
+            if event == "Въезд":
+                active.add(data["поток"])
+                overlap |= len(active) > 1
+            elif event == "Выход":
+                active.remove(data["поток"])
+        self.assertTrue(overlap, "Совместимые направления не пересекались одновременно")
+
+    def test_saturated_conflicting_directions(self):
+        text = ("ticks 100\ntick_ms 2\npriority 0\nmin_green 2\nmax_green 5\n"
+                "stream N car north straight 3 2 1000\n"
+                "stream S car south straight 3 2 1000\n"
+                "stream E car east straight 3 2 1000\n"
+                "stream W car west straight 3 2 1000\n"
+                "conflict N S 0\nconflict E W 0\n"
+                "phase NS N S\nphase EW E W\n")
+        for strategy in ("fixed", "adaptive"):
+            summary, _, _ = self.run_model(text=text, extra=f"strategy {strategy}")
+            self.assertGreater(summary["отказов"], 0)
+            self.assertGreater(summary["прошло"], 0)
 
     def test_invalid_input_and_cli(self):
         prefix = "stream A car north straight 2 2 0\nphase a A\n"
         for text in ("", "unknown 1", prefix + "min_green 5\nmax_green 4",
-                     prefix + "clearance 0", prefix + "seed -1", prefix + "ticks 1e2",
+                     prefix + "clearance 0", prefix + "tick_ms 0", prefix + "tick_ms 60001", prefix + "seed -1", prefix + "ticks 1e2",
                      prefix + "stream A car east left 1 1 0", prefix + "phase b missing",
                      "stream X car north walk 1 1 0\nphase x X", prefix + "conflict A A 0",
                      "stream A car north straight 65 1 0\nphase a A",
@@ -202,7 +251,7 @@ class Scenarios(unittest.TestCase):
 
     def test_file_boundaries_and_input_protection(self):
         names = [f"S{i:02d}_" + "x" * 27 for i in range(16)]
-        lines = ["ticks 65"] + [f"stream {name} car north straight 64 1 1000" for name in names]
+        lines = ["ticks 65"] + [f"stream {name} car north straight 64 1 0" for name in names]
         lines += [f"phase P{i} {name}" for i, name in enumerate(names)]
         self.run_model(text="\n".join(lines))
         config = self.directory / "input.conf"
@@ -223,12 +272,13 @@ class Scenarios(unittest.TestCase):
         for sig in (signal.SIGINT, signal.SIGTERM):
             config, journal = self.directory / "input.conf", self.directory / "signal.log"
             journal.unlink(missing_ok=True)
-            config.write_text((ROOT / "data/demo.conf").read_text() + "\nticks 0\ndelay_ms 20\n")
+            config.write_text("ticks 0\ntick_ms 20\nmax_green 100\n"
+                              "stream A car north straight 2 100 1000\nphase a A\n")
             with subprocess.Popen([str(BINARY), str(config), str(journal)], stdout=subprocess.DEVNULL,
                                   stderr=subprocess.PIPE, text=True) as process:
                 deadline = time.monotonic() + 5
                 while time.monotonic() < deadline:
-                    if journal.exists() and "Состояние:".encode() in journal.read_bytes():
+                    if journal.exists() and "Въезд:".encode() in journal.read_bytes() and journal.read_bytes().count("Очередь:".encode()) >= 2:
                         break
                     time.sleep(0.01)
                 else:

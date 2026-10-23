@@ -42,7 +42,7 @@ typedef struct Config {
   Phase phases[MAX_PHASES];
   uint32_t conflicts[MAX_STREAMS]; // Симметричная матрица, диагональ равна 1.
   unsigned streamCount, phaseCount;
-  unsigned minGreen, maxGreen, clearance, emergencyRate, delayMs, seed;
+  unsigned minGreen, maxGreen, clearance, emergencyRate, tickMs, delayMs, seed;
   uint64_t ticks, target;
   Strategy strategy;
   bool priority;
@@ -50,7 +50,7 @@ typedef struct Config {
 
 // Участник принадлежит одной очереди или активному месту своего потока.
 typedef struct Participant {
-  uint64_t id, arrived;
+  uint64_t id, arrivedNs;
   bool emergency;
 } Participant;
 
@@ -60,7 +60,7 @@ typedef struct Flow {
   unsigned head, count, peak;
   bool occupied;
   Participant active;
-  uint64_t leaveAt, arrived, refused, passed, waitSum, waitMax;
+  uint64_t enteredNs, leaveAtNs, arrived, refused, passed, waitSum, waitMax;
 } Flow;
 
 typedef enum ControllerState { GREEN, DRAIN, CLEARANCE } ControllerState;
@@ -68,7 +68,7 @@ typedef enum ControllerState { GREEN, DRAIN, CLEARANCE } ControllerState;
 typedef struct Controller {
   unsigned phase, nextFixed;
   ControllerState state;
-  uint64_t since;
+  uint64_t sinceNs;
   uint32_t signals;
 } Controller;
 
@@ -93,7 +93,7 @@ void OutputEvent(Output *out, uint64_t tick, const char *description);
 // Загрузка параметров и проверка совместимости фаз.
 bool ConfigLoad(Config *cfg, const char *path);
 bool ConfigValidate(const Config *cfg);
-// Последовательная имитация всех участников.
+// Запуск направлений и участников; контроллер работает в главном потоке.
 int SimulationRun(const Config *cfg, Output *out);
 
 #endif // CROSSROAD_H

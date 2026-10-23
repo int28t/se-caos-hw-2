@@ -49,6 +49,7 @@ static Config TestConfig(void) {
                 .phaseCount = 2,
                 .minGreen = 2,
                 .maxGreen = 4,
+                .tickMs = 1,
                 .clearance = 1,
                 .ticks = 10};
   cfg.streams[0].capacity = 2;
@@ -70,7 +71,7 @@ static void TestStopAndJoin(void) {
   CHECK(s.participantLimit == 5);
   WaitContext contexts[] = {
       {.simulation = &s, .worker = &s.controllerThread},
-      {.simulation = &s, .worker = &s.directionThreads[1]},
+      {.simulation = &s, .worker = &s.directionThreads[1].worker},
       {.simulation = &s, .worker = &s.participants[0].worker}};
   SimulationLock(&s);
   s.participants[0].participantId = 1;
@@ -128,12 +129,14 @@ static void TestInvariants(void) {
   s.participantCount = 0;
   CHECK(SimulationCheckLocked(&s));
   s.tick = 3;
+  s.nowNs = 3 * s.tickNs;
   s.controller.signals = 1;
   s.active = 1;
   s.flows[0].arrived = 1;
   s.flows[0].occupied = true;
   s.flows[0].active = (Participant){.id = 1};
-  s.flows[0].leaveAt = 2;
+  s.flows[0].enteredNs = s.tickNs;
+  s.flows[0].leaveAtNs = 2 * s.tickNs;
   CHECK(SimulationCheckLocked(&s));
   s.flows[0].active.id = 0;
   CHECK(!SimulationCheckLocked(&s));

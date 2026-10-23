@@ -55,7 +55,7 @@ static bool EventsClose(Simulation *s) {
   int error = 0;
   WorkerClose(&s->controllerThread, &error);
   for (unsigned i = 0; i < s->cfg->streamCount; ++i)
-    WorkerClose(&s->directionThreads[i], &error);
+    WorkerClose(&s->directionThreads[i].worker, &error);
   for (unsigned i = 0; i < s->participantLimit; ++i)
     WorkerClose(&s->participants[i].worker, &error);
   if (error)
@@ -67,8 +67,19 @@ static bool EventsClose(Simulation *s) {
 // Конфигурация должна быть проверена до создания состояния запуска.
 bool SimulationInit(Simulation *s, const Config *cfg, Output *out) {
   *s = (Simulation){.cfg = cfg, .out = out};
-  for (unsigned i = 0; i < cfg->streamCount; ++i)
-    s->participantLimit += cfg->streams[i].capacity + 1;
+  s->tickNs = (uint64_t)cfg->tickMs * 1000000;
+  for (unsigned i = 0; i < cfg->streamCount; ++i) {
+    DirectionWorker *direction = &s->directionThreads[i];
+    direction->simulation = s;
+    direction->stream = i;
+    direction->firstParticipant = s->participantLimit;
+    direction->participantLimit = cfg->streams[i].capacity + 1;
+    for (unsigned j = 0; j < direction->participantLimit; ++j) {
+      ParticipantWorker *participant = &s->participants[s->participantLimit++];
+      participant->simulation = s;
+      participant->stream = i;
+    }
+  }
   int error = pthread_mutex_init(&s->mutex, NULL);
   if (error) {
     errno = error;
@@ -78,8 +89,8 @@ bool SimulationInit(Simulation *s, const Config *cfg, Output *out) {
   if (!s->controllerThread.event)
     goto fail;
   for (unsigned i = 0; i < cfg->streamCount; ++i) {
-    s->directionThreads[i].event = EventOpen();
-    if (!s->directionThreads[i].event)
+    s->directionThreads[i].worker.event = EventOpen();
+    if (!s->directionThreads[i].worker.event)
       goto fail;
   }
   for (unsigned i = 0; i < s->participantLimit; ++i) {
@@ -105,7 +116,7 @@ bool SimulationDestroy(Simulation *s) {
     return false;
   }
   for (unsigned i = 0; i < s->cfg->streamCount; ++i)
-    if (s->directionThreads[i].started) {
+    if (s->directionThreads[i].worker.started) {
       errno = EBUSY;
       return false;
     }
@@ -163,6 +174,8 @@ const char *SimulationStopName(StopReason reason) {
     return "ошибка_вывода";
   case STOP_INVARIANT:
     return "нарушен_инвариант";
+  case STOP_RUNTIME_ERROR:
+    return "ошибка_выполнения";
   }
   return "неизвестно";
 }
@@ -176,7 +189,7 @@ static void WorkerNotify(Worker *worker, int *error) {
 //------------------------------------------------------------------------------
 // Первая причина сохраняется; уведомляются все созданные потоки без ожиданий.
 bool SimulationStopLocked(Simulation *s, StopReason reason, int signalNumber) {
-  if (reason <= STOP_NONE || reason > STOP_INVARIANT ||
+  if (reason <= STOP_NONE || reason > STOP_RUNTIME_ERROR ||
       (reason == STOP_SIGNAL &&
        (signalNumber <= 0 || signalNumber > INT_MAX - 128))) {
     errno = EINVAL;
@@ -195,6 +208,7 @@ bool SimulationStopLocked(Simulation *s, StopReason reason, int signalNumber) {
     break;
   case STOP_OUTPUT_ERROR:
   case STOP_INVARIANT:
+  case STOP_RUNTIME_ERROR:
     s->status = 1;
     break;
   default:
@@ -204,7 +218,7 @@ bool SimulationStopLocked(Simulation *s, StopReason reason, int signalNumber) {
   int error = 0;
   WorkerNotify(&s->controllerThread, &error);
   for (unsigned i = 0; i < s->cfg->streamCount; ++i)
-    WorkerNotify(&s->directionThreads[i], &error);
+    WorkerNotify(&s->directionThreads[i].worker, &error);
   for (unsigned i = 0; i < s->participantLimit; ++i)
     WorkerNotify(&s->participants[i].worker, &error);
   if (error) {
@@ -222,7 +236,8 @@ bool SimulationCheckLocked(const Simulation *s) {
   unsigned active = 0, participants = 0;
   uint64_t passed = 0;
   for (unsigned i = 0; i < s->cfg->streamCount; ++i) {
-    if (s->directionThreads[i].finished && !s->directionThreads[i].started)
+    if (s->directionThreads[i].worker.finished &&
+        !s->directionThreads[i].worker.started)
       return false;
     const Flow *f = &s->flows[i];
     unsigned capacity = s->cfg->streams[i].capacity;
@@ -231,13 +246,14 @@ bool SimulationCheckLocked(const Simulation *s) {
     uint64_t previous = 0;
     for (unsigned j = 0; j < f->count; ++j) {
       const Participant *p = &f->items[(f->head + j) % capacity];
-      if (!p->id || p->id <= previous || p->arrived > s->tick ||
+      if (!p->id || p->id <= previous || p->arrivedNs > s->nowNs ||
           (f->occupied && p->id == f->active.id))
         return false;
       previous = p->id;
     }
     if (f->occupied) {
-      if (!f->active.id || f->active.arrived > s->tick ||
+      if (!f->active.id || f->active.arrivedNs > f->enteredNs ||
+          f->enteredNs > s->nowNs || f->leaveAtNs < f->enteredNs ||
           !(s->controller.signals & (UINT32_C(1) << i)) ||
           (s->cfg->conflicts[i] & occupied))
         return false;

@@ -148,6 +148,8 @@ static bool ParseLine(Config *cfg, char **t, unsigned count) {
     cfg->emergencyRate = (unsigned)n;
   else if (!strcmp(t[0], "delay_ms") && n <= 60000)
     cfg->delayMs = (unsigned)n;
+  else if (!strcmp(t[0], "tick_ms") && n && n <= 60000)
+    cfg->tickMs = (unsigned)n;
   else if (!strcmp(t[0], "min_green") && n && n <= 10000)
     cfg->minGreen = (unsigned)n;
   else if (!strcmp(t[0], "max_green") && n && n <= 10000)
@@ -166,6 +168,7 @@ bool ConfigLoad(Config *cfg, const char *path) {
                   .maxGreen = 10,
                   .clearance = 2,
                   .emergencyRate = 20,
+                  .tickMs = 1,
                   .seed = 39,
                   .ticks = 120,
                   .strategy = ADAPTIVE,
@@ -215,8 +218,10 @@ bool ConfigLoad(Config *cfg, const char *path) {
 //------------------------------------------------------------------------------
 // Проверка длительностей, совместимости сигналов и обслуживания каждого потока.
 bool ConfigValidate(const Config *cfg) {
-  if (!cfg->streamCount || !cfg->phaseCount || cfg->minGreen > cfg->maxGreen) {
-    dprintf(STDERR_FILENO, "Нужны потоки, фазы и min_green <= max_green\n");
+  if (!cfg->streamCount || !cfg->phaseCount || !cfg->tickMs ||
+      cfg->tickMs > 60000 || cfg->minGreen > cfg->maxGreen) {
+    dprintf(STDERR_FILENO,
+            "Проверьте потоки, фазы, tick_ms и min_green <= max_green\n");
     return false;
   }
   uint32_t covered = 0;
